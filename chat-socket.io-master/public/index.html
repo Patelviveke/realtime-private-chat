@@ -1,0 +1,61 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>iChat - Private Messaging</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <h1 class="title">iChat 💬</h1>
+
+  <!-- Username login -->
+  <form id="username-form" class="login-box">
+    <h2>Welcome to iChat</h2>
+    <input
+      type="text"
+      id="name-input"
+      placeholder="Enter your username"
+      maxlength="20"
+      required
+    >
+    <button type="submit">Join Chat</button>
+  </form>
+
+  <!-- Chat application -->
+  <div id="chat-app" class="chat-app" hidden>
+
+    <aside class="sidebar">
+      <h2>Messages</h2>
+      <p id="client-total">Online: 0</p>
+      <div id="user-list"></div>
+    </aside>
+
+    <main class="chat-window">
+      <header class="chat-header">
+        <h2 id="active-user-name">Select a user</h2>
+      </header>
+
+      <ul id="message-container" class="message-container"></ul>
+
+      <form id="message-form" class="message-form">
+        <input
+          type="text"
+          id="message-input"
+          placeholder="Select a user first..."
+          autocomplete="off"
+          disabled
+        >
+        <button type="submit" disabled>Send ➤</button>
+      </form>
+    </main>
+
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="main.js"></script>
+
+</body>
+</html>
