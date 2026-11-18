@@ -2,6 +2,9 @@
 const express = require('express');
 const path = require('path');
 const http = require('http');
+const multer = require('multer');
+const fs = require('fs');
+const crypto = require('crypto');
 
 const app = express();
 const server = http.createServer(app);
@@ -9,19 +12,62 @@ const io = require('socket.io')(server);
 
 const PORT = process.env.PORT || 4000;
 
-// Serve frontend files
-app.use(express.static(path.join(__dirname, 'public')));
+const uploadDir = path.join(__dirname, 'uploads');
 
-// Store connected users
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+app.use(express.static(path.join(__dirname, 'public')));
+app.use('/uploads', express.static(uploadDir));
+
 const users = new Map();
 
-// Socket.IO connection
+const allowedTypes = {
+  'image/jpeg': '.jpg',
+  'image/png': '.png',
+  'image/gif': '.gif',
+  'image/webp': '.webp'
+};
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, uploadDir),
+
+  filename: (req, file, cb) => {
+    const extension = allowedTypes[file.mimetype];
+    const filename = crypto.randomBytes(16).toString('hex') + extension;
+    cb(null, filename);
+  }
+});
+
+const upload = multer({
+  storage,
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (allowedTypes[file.mimetype]) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only JPG, PNG, GIF and WEBP images are allowed.'));
+    }
+  }
+});
+
+// Clean reply data received from client
+function cleanReply(reply) {
+  if (!reply || typeof reply !== 'object') return null;
+
+  return {
+    messageId: String(reply.messageId || '').slice(0, 100),
+    name: String(reply.name || '').slice(0, 20),
+    text: String(reply.text || '').slice(0, 200),
+    isImage: Boolean(reply.isImage)
+  };
+}
+
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
 
-  // Register username
   socket.on('register-user', (name) => {
-    // Prevent registering multiple times
     if (users.has(socket.id)) {
       socket.emit('registration-error', 'You are already registered.');
       return;
@@ -34,7 +80,6 @@ io.on('connection', (socket) => {
       return;
     }
 
-    // Check duplicate username
     const alreadyExists = [...users.values()].some(
       (user) => user.name.toLowerCase() === username.toLowerCase()
     );
@@ -46,14 +91,11 @@ io.on('connection', (socket) => {
 
     users.set(socket.id, { name: username });
 
-    socket.emit('registration-success', {
-      name: username
-    });
-
+    socket.emit('registration-success', { name: username });
     updateUsers();
   });
 
-  // Private messaging
+  // Private text message with reply support
   socket.on('private-message', (data = {}) => {
     const sender = users.get(socket.id);
     const to = data.to;
@@ -69,24 +111,22 @@ io.on('connection', (socket) => {
       return;
     }
 
-    const cleanMessage = String(data.message || '')
-      .trim()
-      .slice(0, 2000);
+    const cleanMessage = String(data.message || '').trim().slice(0, 2000);
 
     if (!cleanMessage) return;
 
     const messageData = {
+      messageId: String(data.messageId || crypto.randomBytes(16).toString('hex')).slice(0, 100),
       from: socket.id,
       name: sender.name,
       message: cleanMessage,
+      replyTo: cleanReply(data.replyTo),
       dateTime: new Date().toISOString()
     };
 
-    // Send only to selected recipient
     io.to(to).emit('private-message', messageData);
   });
 
-  // Disconnect user
   socket.on('disconnect', () => {
     if (users.has(socket.id)) {
       users.delete(socket.id);
@@ -97,20 +137,99 @@ io.on('connection', (socket) => {
   });
 });
 
-// Update online users list
+// Image upload route with reply support
+app.post(
+  '/upload-image',
+  (req, res, next) => {
+    const senderId = req.headers['x-socket-id'];
+
+    if (!senderId || !users.has(senderId)) {
+      return res.status(401).json({ error: 'Please register first.' });
+    }
+
+    next();
+  },
+  upload.single('image'),
+  (req, res) => {
+    const senderId = req.headers['x-socket-id'];
+    const to = req.body.to;
+
+    const sender = users.get(senderId);
+    const recipient = users.get(to);
+
+    if (!sender || !recipient || to === senderId) {
+      if (req.file) fs.unlink(req.file.path, () => {});
+
+      return res.status(400).json({
+        error: 'Recipient is not available.'
+      });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({
+        error: 'Please select an image.'
+      });
+    }
+
+    let replyTo = null;
+
+    try {
+      replyTo = cleanReply(
+        req.body.replyTo ? JSON.parse(req.body.replyTo) : null
+      );
+    } catch {
+      if (req.file) fs.unlink(req.file.path, () => {});
+
+      return res.status(400).json({
+        error: 'Invalid reply information.'
+      });
+    }
+
+    const imageData = {
+      messageId: String(req.body.messageId || crypto.randomBytes(16).toString('hex')).slice(0, 100),
+      from: senderId,
+      name: sender.name,
+      imageUrl: '/uploads/' + req.file.filename,
+      replyTo,
+      dateTime: new Date().toISOString()
+    };
+
+    io.to(to).emit('private-image', imageData);
+
+    res.json({
+      success: true,
+      image: imageData
+    });
+  }
+);
+
+// Upload errors
+app.use((err, req, res, next) => {
+  console.error('Upload error:', err.message);
+
+  if (err instanceof multer.MulterError) {
+    return res.status(400).json({
+      error: err.code === 'LIMIT_FILE_SIZE'
+        ? 'Image must be 5 MB or smaller.'
+        : err.message
+    });
+  }
+
+  res.status(400).json({
+    error: err.message || 'Image upload failed.'
+  });
+});
+
 function updateUsers() {
-  const userList = [...users.entries()].map(
-    ([socketId, user]) => ({
-      socketId,
-      name: user.name
-    })
-  );
+  const userList = [...users.entries()].map(([socketId, user]) => ({
+    socketId,
+    name: user.name
+  }));
 
   io.emit('users-list', userList);
   io.emit('clients-total', users.size);
 }
 
-// Start server
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`Chat server running on port ${PORT}`);
 });
